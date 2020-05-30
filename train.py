@@ -67,13 +67,60 @@ def main(args):
 
     save_model_path = os.path.join(args.save_model_path, ts)
     os.makedirs(save_model_path)
+    
+    def sigmoid(step):
+        x = step - 6569.5
+        if x < 0:
+            a = np.exp(x) 
+            res = (a / (1 + a))
+        else:
+            res = (1 / (1 + np.exp(-x)))
+        return float(res)
+        
+    def frange_cycle_linear(n_iter, start=0.0, stop=1.0,  n_cycle=4, ratio=0.5):
+        L = np.ones(n_iter) * stop
+        period = n_iter/n_cycle
+        step = (stop-start)/(period*ratio) # linear schedule
+    
+        for c in range(n_cycle):
+            v, i = start, 0
+            while v <= stop and (int(i+c*period) < n_iter):
+                L[int(i+c*period)] = v
+                v += step
+                i += 1
+        return L 
+        
+    n_iter = 0
+    for epoch in range(args.epochs):
+        split = 'train'
+        data_loader = DataLoader(
+                dataset=datasets[split],
+                batch_size=args.batch_size,
+                shuffle=split=='train',
+                num_workers=cpu_count(),
+                pin_memory=torch.cuda.is_available()
+            )
+            
+        for iteration, batch in enumerate(data_loader):
+            n_iter += 1
+    print("Total no of iterations = " + str(n_iter))
+            
+        
+    L = frange_cycle_linear(n_iter)
 
     def kl_anneal_function(anneal_function, step):
         if anneal_function == 'identity':
             return 1
 
+        if anneal_function == 'sigmoid':
+            return sigmoid(step)
+        
+        if anneal_function == 'cyclic':
+            return float(L[step])
+
+
     ReconLoss = torch.nn.NLLLoss(size_average=False, ignore_index=datasets['train'].pad_idx)
-    def loss_fn(logp, target, length, mean, logv, anneal_function, step):
+    def loss_fn(logp, target, length, mean, logv, anneal_function, step, split='train'):
 
         # cut-off unnecessary padding from target, and flatten
         target = target[:, :torch.max(length).data[0]].contiguous().view(-1)
@@ -84,7 +131,10 @@ def main(args):
 
         # KL Divergence
         KL_loss = -0.5 * torch.sum(1 + logv - mean.pow(2) - logv.exp())
-        KL_weight = kl_anneal_function(anneal_function, step)
+        if split == 'train':
+            KL_weight = kl_anneal_function(anneal_function, step)
+        else:
+            KL_weight = 1
 
         return recon_loss, KL_loss, KL_weight
 
@@ -125,7 +175,7 @@ def main(args):
 
                 # loss calculation
                 recon_loss, KL_loss, KL_weight = loss_fn(logp, batch['target'],
-                    batch['length'], mean, logv, args.anneal_function, step)
+                    batch['length'], mean, logv, args.anneal_function, step, split)
 
                 if split == 'train':
                     loss = (recon_loss + KL_weight * KL_loss)/batch_size
